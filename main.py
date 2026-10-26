@@ -454,6 +454,7 @@ class App:
         self.scheduler: threading.Thread | None = None
         self.signing = False
         self.scheduler_enabled = False
+        self.schedule_version = 0
         self.closing = False
         self.build_gui()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -485,6 +486,8 @@ class App:
         self.start_btn.pack(side="left", padx=(0, 6))
         self.stop_btn = ttk.Button(buttons, text="停止定时", command=self.stop_scheduler, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
+        self.random_btn = ttk.Button(buttons, text="????", command=self.randomize_schedule, state="disabled")
+        self.random_btn.pack(side="left", padx=6)
         self.sign_btn = ttk.Button(buttons, text="立即签到", command=self.manual_sign)
         self.sign_btn.pack(side="left", padx=6)
         self.cancel_btn = ttk.Button(buttons, text="立即停止", command=self.immediate_stop, state="disabled")
@@ -565,24 +568,39 @@ class App:
                 self.events.put({"type": "restart_scheduler"})
         except Exception as exc:
             if self.cancel_event.is_set():
-                self.logger.info("签到任务已停止")
-                self.emit_status(status="已停止")
+                self.logger.info("\u7b7e\u5230\u4efb\u52a1\u5df2\u505c\u6b62")
+                self.emit_status(status="\u5df2\u505c\u6b62")
             else:
-                self.logger.exception("签到失败：%s", exc)
-                retry_minutes = max(1, self.config.getint("settings", "retry_interval_minutes", fallback=30))
-                retry = now_bj() + timedelta(minutes=retry_minutes)
-                with self.guard:
-                    self.state["next_sign_time"] = fmt(retry)
-                    write_state(self.state)
-                self.events.put({"type": "failed", "error": str(exc), "next": fmt(retry), "timer": source == "timer"})
-                if source == "timer":
-                    self.events.put({"type": "restart_scheduler"})
+                error_text = str(exc)
+                auth_error = isinstance(exc, SignError) and (
+                    "\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef" in error_text
+                    or "\u767b\u5f55\u5931\u8d25" in error_text
+                )
+                if auth_error:
+                    self.logger.error("\u7b7e\u5230\u5931\u8d25\uff1a%s", error_text)
+                    self.scheduler_enabled = False
+                    self.stop_event.set()
+                    self.events.put({"type": "auth_failed", "error": error_text})
+                else:
+                    if isinstance(exc, SignError):
+                        self.logger.error("\u7b7e\u5230\u5931\u8d25\uff1a%s", error_text)
+                    else:
+                        self.logger.exception("\u7b7e\u5230\u5931\u8d25\uff1a%s", error_text)
+                    retry_minutes = max(1, self.config.getint("settings", "retry_interval_minutes", fallback=30))
+                    retry = now_bj() + timedelta(minutes=retry_minutes)
+                    with self.guard:
+                        self.state["next_sign_time"] = fmt(retry)
+                        write_state(self.state)
+                    self.events.put({"type": "failed", "error": error_text, "next": fmt(retry), "timer": source == "timer"})
+                    if source == "timer":
+                        self.events.put({"type": "restart_scheduler"})
         finally:
             self.events.put({"type": "sign_done"})
 
     def scheduler_loop(self) -> None:
         """按北京时间随机窗口轮询；失败按重试间隔再次执行。"""
         current = now_bj()
+        version = self.schedule_version
         today = current.strftime("%Y-%m-%d")
         with self.guard:
             signed_today = self.state.get("last_sign_date") == today
@@ -598,7 +616,7 @@ class App:
                 self.state["next_sign_time"] = fmt(target)
                 write_state(self.state)
         self.events.put({"type": "schedule", "next": fmt(target)})
-        while not self.stop_event.is_set() and not self.cancel_event.is_set() and not self.closing:
+        while version == self.schedule_version and not self.stop_event.is_set() and not self.cancel_event.is_set() and not self.closing:
             if now_bj() >= target:
                 if self.state.get("last_sign_date") == now_bj().strftime("%Y-%m-%d"):
                     target = random_next_day(now_bj())
@@ -628,8 +646,10 @@ class App:
         self.stop_event.clear()
         self.cancel_event.clear()
         self.scheduler_enabled = True
+        self.schedule_version += 1
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
+        self.random_btn.configure(state="normal")
         self.scheduler = threading.Thread(target=self.scheduler_loop, daemon=True, name="RiverNexusScheduler")
         self.scheduler.start()
         self.status_var.set("定时运行中")
@@ -638,19 +658,37 @@ class App:
     def stop_scheduler(self) -> None:
         """停止定时轮询，不影响手动签到。"""
         self.scheduler_enabled = False
+        self.schedule_version += 1
         self.stop_event.set()
         self.stop_btn.configure(state="disabled")
         self.start_btn.configure(state="normal")
+        self.random_btn.configure(state="disabled")
         self.status_var.set("已停止")
         self.logger.info("定时任务已停止")
+
+    def randomize_schedule(self) -> None:
+        """\u5b9a\u65f6\u8fd0\u884c\u671f\u95f4\u91cd\u65b0\u751f\u6210\u6b21\u65e5 00:00-12:00 \u7684\u968f\u673a\u7b7e\u5230\u65f6\u95f4\u3002"""
+        if not self.scheduler_enabled or str(self.start_btn.cget("state")) != "disabled":
+            return
+        target = random_next_day(now_bj())
+        with self.guard:
+            self.state["next_sign_time"] = fmt(target)
+            write_state(self.state)
+        self.schedule_version += 1
+        self.events.put({"type": "schedule", "next": fmt(target)})
+        self.status_var.set("\u968f\u673a\u65f6\u95f4\u5df2\u66f4\u65b0")
+        self.scheduler = threading.Thread(target=self.scheduler_loop, daemon=True, name="RiverNexusScheduler")
+        self.scheduler.start()
 
     def immediate_stop(self) -> None:
         """\u7acb\u5373\u8bf7\u6c42\u505c\u6b62\u5f53\u524d\u7b7e\u5230\u53ca\u5b9a\u65f6\u8f6e\u8be2\u3002"""
         self.cancel_event.set()
         self.scheduler_enabled = False
+        self.schedule_version += 1
         self.stop_event.set()
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
+        self.random_btn.configure(state="disabled")
         self.status_var.set("\u6b63\u5728\u505c\u6b62")
         self.logger.warning("\u5df2\u8bf7\u6c42\u7acb\u5373\u505c\u6b62")
 
@@ -682,14 +720,20 @@ class App:
                     self.next_var.set(event["next"])
                     self.status_var.set("今日已签到")
                     self.logger.info("签到状态：%s；本次奖励：%s；原文：%s", "此前已签到" if event["already"] else "签到成功", event["reward"], event["message"])
-                    if not self.stop_event.is_set():
+                    if not self.stop_event.is_set() and self.scheduler_enabled:
                         self.stop_btn.configure(state="normal")
+                        self.random_btn.configure(state="normal")
+                elif kind == "auth_failed":
+                    self.today_var.set("\u767b\u5f55\u5931\u8d25")
+                    self.status_var.set("\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef")
+                    self.start_btn.configure(state="normal")
+                    self.stop_btn.configure(state="disabled")
+                    self.random_btn.configure(state="disabled")
                 elif kind == "failed":
                     self.today_var.set("签到失败")
                     self.status_var.set("等待重试" if event["timer"] else "失败")
                     self.next_var.set(event["next"])
                     self.logger.error("签到失败，将于 %s 重试", event["next"])
-                    self.logger.error("\u9519\u8bef\u63d0\u793a\uff1a%s", event["error"])
                 elif kind == "sign_done":
                     self.signing = False
                     self.sign_btn.configure(state="normal")
@@ -697,6 +741,7 @@ class App:
                     if self.stop_event.is_set():
                         self.start_btn.configure(state="normal")
                         self.stop_btn.configure(state="disabled")
+                        self.random_btn.configure(state="disabled")
                 elif kind == "timer_due":
                     if not self.signing and self.scheduler_enabled:
                         self.launch_sign("timer")
@@ -710,14 +755,14 @@ class App:
         self.root.after(150, self.consume_events)
 
     def show_log_menu(self, event: Any) -> None:
-        """??????????"""
+        """\u663e\u793a\u65e5\u5fd7\u6846\u53f3\u952e\u83dc\u5355\u3002"""
         try:
             self.log_menu.tk_popup(event.x_root, event.y_root)
         finally:
             self.log_menu.grab_release()
 
     def copy_log_selection(self) -> None:
-        """????????????????????"""
+        """\u590d\u5236\u65e5\u5fd7\u9009\u4e2d\u6587\u672c\uff1b\u672a\u9009\u62e9\u65f6\u590d\u5236\u5168\u90e8\u65e5\u5fd7\u3002"""
         try:
             try:
                 text = self.log.get("sel.first", "sel.last")
@@ -726,17 +771,17 @@ class App:
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
             self.root.update()
-            self.logger.info("???????")
+            self.logger.info("\u5df2\u590d\u5236\u65e5\u5fd7\u5185\u5bb9")
         except Exception as exc:
-            self.logger.error("\u8f93\u5165\u6821\u9a8c\u5931\u8d25\uff1a%s", exc)
+            self.logger.error("\u590d\u5236\u65e5\u5fd7\u5931\u8d25\uff1a%s", exc)
 
     def clear_log(self) -> None:
-        """?? GUI ???????????"""
+        """\u6e05\u7a7a GUI \u65e5\u5fd7\uff0c\u4e0d\u5220\u9664\u65e5\u5fd7\u6587\u4ef6\u3002"""
         try:
             self.log.configure(state="normal")
             self.log.delete("1.0", END)
             self.log.configure(state="disabled")
-            self.logger.info("GUI ?????")
+            self.logger.info("GUI \u65e5\u5fd7\u5df2\u6e05\u7a7a")
         except TclError:
             pass
 

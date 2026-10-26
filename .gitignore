@@ -21,3 +21,5 @@ venv/
 
 # Temporary alternate PyInstaller output
 *_fixed/
+
+*_final/

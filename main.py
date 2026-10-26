@@ -16,8 +16,9 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, time as dt_time, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
-from tkinter import END, StringVar, Tk, TclError, messagebox
+from tkinter import END, Menu, StringVar, Tk, TclError
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any
@@ -31,6 +32,8 @@ CHECKIN_API = "/api/user/checkin"
 PROXY_URL = "http://127.0.0.1:10808"
 API_TIMEOUT_SECONDS = 8
 MAX_GUI_LOG_LINES = 3000
+QUOTA_UNITS_PER_USD = Decimal("500000")
+USD_QUANTUM = Decimal("0.0001")
 try:
     BJ = ZoneInfo("Asia/Shanghai")
 except ZoneInfoNotFoundError:
@@ -184,14 +187,22 @@ class SignError(RuntimeError):
     """登录、接口或签到操作失败。"""
 
 
+
+class NetworkError(SignError):
+    """????????????????????"""
+
 def request_json(opener: Any, path: str, method: str, payload: dict[str, Any] | None,
                  token: str = "", cancel: threading.Event | None = None) -> dict[str, Any]:
-    """发送 JSON API 请求，将 HTTP/网络/鉴权错误转成中文异常。"""
+    """?? JSON API ????????????? HTTP ????"""
     if cancel and cancel.is_set():
-        raise SignError("操作已停止")
-    headers = {"Accept": "application/json", "Content-Type": "application/json",
-               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
-               "Origin": SITE_HOME.rstrip("/"), "Referer": SITE_HOME}
+        raise SignError("\u64cd\u4f5c\u5df2\u505c\u6b62")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
+        "Origin": SITE_HOME.rstrip("/"),
+        "Referer": SITE_HOME,
+    }
     if token:
         headers["Authorization"] = f"Bearer {token}"
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
@@ -209,20 +220,39 @@ def request_json(opener: Any, path: str, method: str, payload: dict[str, Any] | 
         nested = body_data.get("error") if isinstance(body_data.get("error"), dict) else {}
         message = body_data.get("message") or nested.get("message") or text[:300] or f"HTTP {exc.code}"
         if exc.code in (401, 403):
-            raise SignError(f"账号或密码错误，或登录已失效：{message}") from exc
-        raise SignError(f"服务器错误（HTTP {exc.code}）：{message}") from exc
+            raise SignError(f"\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef\uff0c\u6216\u767b\u5f55\u5df2\u5931\u6548\uff08HTTP {exc.code}\uff09\uff1a{message}") from exc
+        raise SignError(f"\u670d\u52a1\u5668\u9519\u8bef\uff08HTTP {exc.code}\uff09\uff1a{message}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         reason = getattr(exc, "reason", None) or str(exc)
-        raise SignError(f"网络连接失败，请检查代理 {PROXY_URL}：{reason}") from exc
+        raise NetworkError(f"\u7f51\u7edc\u8fde\u63a5\u5931\u8d25\uff1a{reason}") from exc
     try:
         data = json.loads(text) if text else {}
     except json.JSONDecodeError as exc:
-        raise SignError(f"服务器返回非 JSON 数据（HTTP {status}）：{text[:300]}") from exc
+        raise SignError(f"\u670d\u52a1\u5668\u8fd4\u56de\u975e JSON \u6570\u636e\uff08HTTP {status}\uff09\uff1a{text[:300]}") from exc
     if not isinstance(data, dict):
-        raise SignError("服务器响应格式错误：预期 JSON 对象")
+        raise SignError("\u670d\u52a1\u5668\u54cd\u5e94\u683c\u5f0f\u9519\u8bef\uff1a\u9884\u671f JSON \u5bf9\u8c61")
+    data.setdefault("_http_status", status)
     if status >= 400:
-        raise SignError(f"服务器错误（HTTP {status}）：{data.get('message') or data.get('error') or '请求失败'}")
+        raise SignError(f"\u670d\u52a1\u5668\u9519\u8bef\uff08HTTP {status}\uff09\uff1a{data.get('message') or data.get('error') or '\u8bf7\u6c42\u5931\u8d25'}")
     return data
+
+
+def request_with_fallback(direct_opener: Any, proxy_opener: Any, path: str, method: str,
+                          payload: dict[str, Any] | None, token: str,
+                          cancel: threading.Event, logger: logging.Logger) -> dict[str, Any]:
+    """\u4f18\u5148\u76f4\u8fde\uff1b\u76f4\u8fde\u7f51\u7edc\u5931\u8d25\u540e\u8bb0\u5f55\u9519\u8bef\u5e76\u5207\u6362\u672c\u5730\u4ee3\u7406\u3002"""
+    try:
+        logger.info("\u63a5\u53e3\u8bf7\u6c42\u4f18\u5148\u4f7f\u7528\u76f4\u8fde\uff1a%s %s", method, path)
+        return request_json(direct_opener, path, method, payload, token, cancel)
+    except NetworkError as direct_error:
+        logger.error("\u76f4\u8fde\u8bf7\u6c42\u5931\u8d25\uff1a%s", direct_error)
+        logger.info("\u5f00\u59cb\u4f7f\u7528\u672c\u5730\u4ee3\u7406 %s \u91cd\u8bd5\uff1a%s %s", PROXY_URL, method, path)
+        try:
+            result = request_json(proxy_opener, path, method, payload, token, cancel)
+            logger.info("\u672c\u5730\u4ee3\u7406\u8bf7\u6c42\u6210\u529f\uff1a%s %s", method, path)
+            return result
+        except NetworkError as proxy_error:
+            raise NetworkError(f"\u76f4\u8fde\u548c\u672c\u5730\u4ee3\u7406\u5747\u5931\u8d25\uff1b\u76f4\u8fde\uff1a{direct_error}\uff1b\u4ee3\u7406\uff1a{proxy_error}") from proxy_error
 
 
 def walk_dicts(obj: Any):
@@ -237,7 +267,7 @@ def walk_dicts(obj: Any):
 
 
 def field_value(data: Any, keys: tuple[str, ...], labels: tuple[str, ...]) -> str:
-    """从接口数据按字段名或中文标签读取统计值。"""
+    """??????????????????????"""
     normalized = {key.casefold() for key in keys}
     for item in walk_dicts(data):
         for key, value in item.items():
@@ -245,77 +275,150 @@ def field_value(data: Any, keys: tuple[str, ...], labels: tuple[str, ...]) -> st
                 return str(value)
             if any(label in str(key) for label in labels) and value is not None and not isinstance(value, (dict, list)):
                 return str(value)
-    return "—"
+    return "\u2014"
+
+
+def as_decimal(value: Any) -> Decimal | None:
+    """???????????? Decimal?"""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def format_quota_usd(value: Any) -> str:
+    """??? quota ?????????????????
+
+    RiverNexus ? quota ????????????? 20088 ??
+    20088 / 500000 = 0.040176??????????? $0.0402?
+    """
+    number = as_decimal(value)
+    if number is None:
+        return "\u672a\u8bc6\u522b"
+    dollars = (number / QUOTA_UNITS_PER_USD).quantize(USD_QUANTUM, rounding=ROUND_HALF_UP)
+    return f"${dollars:.4f}"
+
+
+def find_quota_value(data: Any, keys: tuple[str, ...] = ("quota_awarded", "awarded_quota", "reward_quota", "checkin_reward_quota")) -> Decimal | None:
+    """???????? quota ????????"""
+    wanted = {key.casefold() for key in keys}
+    for item in walk_dicts(data):
+        for key, value in item.items():
+            if str(key).casefold() in wanted:
+                number = as_decimal(value)
+                if number is not None:
+                    return number
+    return None
+
+
+def find_stats_object(data: Any) -> dict[str, Any]:
+    """?? /api/user/checkin ??? stats ???"""
+    for item in walk_dicts(data):
+        if isinstance(item.get("records"), list) and any(key in item for key in ("total_checkins", "total_quota", "checked_in_today")):
+            return item
+    return {}
 
 
 def extract_reward(data: Any, text: str) -> str:
-    """只提取本次签到奖励字段，不把累计额度误报成本次奖励。"""
-    for item in walk_dicts(data):
-        for key in ("quota_awarded", "awarded_quota", "reward_quota", "reward_amount", "checkin_reward"):
-            value = item.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return f"{value:g} 积分" if isinstance(value, float) else f"{value} 积分"
-    match = re.search(r"(?:\u83b7\u5f97|\u5956\u52b1|\u8d60\u9001|\u7b7e\u5230\u6210\u529f[^0-9]*)\s*([0-9]+(?:\.[0-9]+)?)\s*(\u5143|USDT|RMB|\u91d1\u5e01|\u79ef\u5206|GTC)?", text, re.I)
+    """??????????? quota ??????????"""
+    quota = find_quota_value(data)
+    if quota is not None:
+        return format_quota_usd(quota)
+    match = re.search(r"(?:\u83b7\u5f97|\u5956\u52b1|\u8d60\u9001|\u7b7e\u5230\u6210\u529f[^0-9]*)\s*([0-9]+(?:\.[0-9]+)?)\s*(\u5143|\$|USD|USDT|RMB|\u91d1\u5e01|\u79ef\u5206|GTC)?", text, re.I)
     if not match:
         return "\u672a\u8bc6\u522b"
-    return f"{match.group(1)} {match.group(2) or ''}".strip()
+    unit = match.group(2) or ""
+    if unit == "$":
+        return f"${Decimal(match.group(1)).quantize(USD_QUANTUM):.4f}"
+    return f"{match.group(1)} {unit}".strip()
 
 
 def parse_welfare_stats(data: Any) -> dict[str, str]:
-    """读取福利接口中累计签到、本月获得、累计获得统计。"""
+    """???????????????????????????"""
+    stats = find_stats_object(data)
+    total_checkins = stats.get("total_checkins", stats.get("checkin_count", "?"))
+    total_quota = stats.get("total_quota")
+    month_quota = stats.get("monthly_quota", stats.get("month_quota", stats.get("monthly_total_quota")))
+    records = stats.get("records") if isinstance(stats.get("records"), list) else []
+    if month_quota is None:
+        current_month = now_bj().strftime("%Y-%m")
+        month_sum = Decimal("0")
+        has_month_records = False
+        for record in records:
+            if not isinstance(record, dict) or not str(record.get("checkin_date", "")).startswith(current_month):
+                continue
+            quota = as_decimal(record.get("quota_awarded"))
+            if quota is not None:
+                month_sum += quota
+                has_month_records = True
+        if has_month_records:
+            month_quota = month_sum
     return {
-        "streak": field_value(data, ("total_checkin_days", "checkin_days", "total_days", "sign_days", "continuous_days", "checkin_count"), ("累计签到",)),
-        "month": field_value(data, ("monthly_earned", "month_earned", "month_reward", "monthly_reward", "this_month_reward"), ("本月获得",)),
-        "total": field_value(data, ("total_earned", "total_reward", "total_rewards", "cumulative_reward", "all_time_reward"), ("累计获得",)),
+        "streak": str(total_checkins) if total_checkins is not None else "?",
+        "month": format_quota_usd(month_quota) if month_quota is not None else "?",
+        "total": format_quota_usd(total_quota) if total_quota is not None else "?",
     }
 
-
 def sign_once(username: str, password: str, cancel: threading.Event, logger: logging.Logger) -> dict[str, Any]:
-    """登录校验、读取签到统计并通过签到 POST 接口提交签到。"""
+    """???????????????? POST ???????"""
+    cookie_jar = http.cookiejar.CookieJar()
+    direct_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
     proxy_handler = urllib.request.ProxyHandler({"http": PROXY_URL, "https": PROXY_URL})
-    opener = urllib.request.build_opener(proxy_handler, urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-    logger.info("正在登录 %s", "https://rivernexus.vip/sign-in")
-    login = request_json(opener, LOGIN_API, "POST", {"username": username, "password": password}, cancel=cancel)
+    proxy_opener = urllib.request.build_opener(proxy_handler, urllib.request.HTTPCookieProcessor(cookie_jar))
+
+    logger.info("\u6b63\u5728\u767b\u5f55 %s", "https://rivernexus.vip/sign-in")
+    login = request_with_fallback(
+        direct_opener, proxy_opener, LOGIN_API, "POST",
+        {"username": username, "password": password}, "", cancel, logger,
+    )
     if login.get("success") is not True:
-        message = login.get("message") or login.get("error") or "服务器拒绝登录"
-        raise SignError(f"账号或密码错误/登录失败：{message}")
+        message = login.get("message") or login.get("error") or "\u670d\u52a1\u5668\u62d2\u7edd\u767b\u5f55"
+        raise SignError(f"\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef/\u767b\u5f55\u5931\u8d25\uff08HTTP {login.get('_http_status', '?')}\uff09\uff1a{message}")
     login_data = login.get("data") if isinstance(login.get("data"), dict) else {}
     token = str(login_data.get("access_token") or login_data.get("token") or "")
     if not token:
-        raise SignError("登录响应未包含有效令牌，无法确认账号密码校验成功")
-    logger.info("登录校验成功")
+        raise SignError("\u767b\u5f55\u54cd\u5e94\u672a\u5305\u542b\u6709\u6548\u4ee4\u724c\uff0c\u65e0\u6cd5\u786e\u8ba4\u8d26\u53f7\u5bc6\u7801\u6821\u9a8c\u6210\u529f")
+    logger.info("\u767b\u5f55\u6821\u9a8c\u6210\u529f")
 
-    logger.info("读取福利签到数据：%s", WELFARE_URL)
-    status = request_json(opener, CHECKIN_API, "GET", None, token, cancel)
+    logger.info("\u8bfb\u53d6\u798f\u5229\u7b7e\u5230\u6570\u636e\uff1a%s", WELFARE_URL)
+    status = request_with_fallback(direct_opener, proxy_opener, CHECKIN_API, "GET", None, token, cancel, logger)
     stats = parse_welfare_stats(status)
     status_data = status.get("data") if isinstance(status.get("data"), dict) else {}
     messages = [str(item.get("message", "")) for item in walk_dicts(status) if item.get("message")]
-    checked = any(item.get("checked_in_today") is True or item.get("already_signed") is True for item in walk_dicts(status))
-    checked = checked or any(any(word in message for word in ("\u4eca\u65e5\u5df2\u7b7e\u5230", "\u5df2\u7ecf\u7b7e\u5230", "\u5df2\u5b8c\u6210\u7b7e\u5230")) for message in messages)
+    checked = any(
+        item.get("checked_in_today") is True or item.get("already_signed") is True
+        for item in walk_dicts(status)
+    )
+    checked = checked or any(
+        any(word in message for word in ("\u4eca\u65e5\u5df2\u7b7e\u5230", "\u5df2\u7ecf\u7b7e\u5230", "\u5df2\u5b8c\u6210\u7b7e\u5230"))
+        for message in messages
+    )
     if checked:
-        message = str(status.get("message") or status_data.get("message") or "今日已签到")
+        message = str(status.get("message") or status_data.get("message") or "\u4eca\u65e5\u5df2\u7b7e\u5230")
         reward = extract_reward(status, message)
-        logger.info("今日已签到：%s", message)
+        logger.info("\u4eca\u65e5\u5df2\u7b7e\u5230\uff1a%s\uff1b\u672c\u6b21\u5956\u52b1\uff1a%s", message, reward)
         return {"already": True, "reward": reward, "message": message, "stats": stats}
 
     if cancel.is_set():
-        raise SignError("操作已停止")
-    logger.info("执行立即签到接口：POST %s", CHECKIN_API)
-    result = request_json(opener, CHECKIN_API, "POST", {}, token, cancel)
+        raise SignError("\u64cd\u4f5c\u5df2\u505c\u6b62")
+    logger.info("\u6267\u884c\u7acb\u5373\u7b7e\u5230\u63a5\u53e3\uff1aPOST %s", CHECKIN_API)
+    result = request_with_fallback(direct_opener, proxy_opener, CHECKIN_API, "POST", {}, token, cancel, logger)
     message = str(result.get("message") or result.get("error") or json.dumps(result, ensure_ascii=False))
     success = result.get("success") is True
-    already = "已签到" in message or "已经签到" in message
+    already = "\u5df2\u7b7e\u5230" in message or "\u5df2\u7ecf\u7b7e\u5230" in message
     if not success and not already:
-        raise SignError(f"签到失败：{message}")
+        raise SignError(f"\u7b7e\u5230\u5931\u8d25\uff08HTTP {result.get('_http_status', '?')}\uff09\uff1a{message}")
     reward_data = result.get("data") if result.get("data") is not None else result
     reward = extract_reward(reward_data, message)
     if already:
-        logger.info("服务器提示今日已签到：%s", message)
+        logger.info("\u670d\u52a1\u5668\u63d0\u793a\u4eca\u65e5\u5df2\u7b7e\u5230\uff1a%s\uff1b\u672c\u6b21\u5956\u52b1\uff1a%s", message, reward)
     else:
-        logger.info("签到成功，奖励：%s；服务器提示：%s", reward, message)
+        logger.info("\u7b7e\u5230\u6210\u529f\uff0c\u5956\u52b1\uff1a%s\uff1b\u670d\u52a1\u5668\u63d0\u793a\uff1a%s", reward, message)
     refreshed = parse_welfare_stats(result)
     for key, value in stats.items():
-        if refreshed[key] == "—":
+        if refreshed[key] in {"\u2014", "?", "N/A"}:
             refreshed[key] = value
     return {"already": already, "reward": reward, "message": message, "stats": refreshed}
 
@@ -409,6 +512,10 @@ class App:
         log_frame.pack(fill="both", expand=True)
         self.log = ScrolledText(log_frame, wrap="word", state="disabled", height=12, bg="#111111", fg="#b7f7b7", insertbackground="#b7f7b7", font=("Consolas", 9))
         self.log.pack(fill="both", expand=True)
+        self.log_menu = Menu(self.root, tearoff=False)
+        self.log_menu.add_command(label="\u590d\u5236", command=self.copy_log_selection)
+        self.log_menu.add_command(label="\u6e05\u7a7a", command=self.clear_log)
+        self.log.bind("<Button-3>", self.show_log_menu)
 
     def emit_status(self, **values: Any) -> None:
         self.events.put({"type": "status", **values})
@@ -430,7 +537,8 @@ class App:
         try:
             username, password = self.save_credentials()
         except Exception as exc:
-            messagebox.showwarning(APP_TITLE, str(exc), parent=self.root)
+            self.logger.error("\u8f93\u5165\u6821\u9a8c\u5931\u8d25\uff1a%s", exc)
+            self.status_var.set("\u8f93\u5165\u9519\u8bef\uff0c\u8bf7\u67e5\u770b\u65e5\u5fd7")
             return
         self.signing = True
         self.sign_btn.configure(state="disabled")
@@ -514,11 +622,14 @@ class App:
         try:
             self.save_credentials()
         except Exception as exc:
-            messagebox.showwarning(APP_TITLE, str(exc), parent=self.root)
+            self.logger.error("\u8f93\u5165\u6821\u9a8c\u5931\u8d25\uff1a%s", exc)
+            self.status_var.set("\u8f93\u5165\u9519\u8bef\uff0c\u8bf7\u67e5\u770b\u65e5\u5fd7")
             return
         self.stop_event.clear()
         self.cancel_event.clear()
         self.scheduler_enabled = True
+        self.start_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
         self.scheduler = threading.Thread(target=self.scheduler_loop, daemon=True, name="RiverNexusScheduler")
         self.scheduler.start()
         self.status_var.set("定时运行中")
@@ -534,11 +645,14 @@ class App:
         self.logger.info("定时任务已停止")
 
     def immediate_stop(self) -> None:
-        """立即请求停止当前签到及定时轮询。"""
+        """\u7acb\u5373\u8bf7\u6c42\u505c\u6b62\u5f53\u524d\u7b7e\u5230\u53ca\u5b9a\u65f6\u8f6e\u8be2\u3002"""
         self.cancel_event.set()
+        self.scheduler_enabled = False
         self.stop_event.set()
-        self.status_var.set("正在停止")
-        self.logger.warning("已请求立即停止")
+        self.start_btn.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+        self.status_var.set("\u6b63\u5728\u505c\u6b62")
+        self.logger.warning("\u5df2\u8bf7\u6c42\u7acb\u5373\u505c\u6b62")
 
     def consume_events(self) -> None:
         """由主线程消费后台线程事件并刷新界面。"""
@@ -575,8 +689,7 @@ class App:
                     self.status_var.set("等待重试" if event["timer"] else "失败")
                     self.next_var.set(event["next"])
                     self.logger.error("签到失败，将于 %s 重试", event["next"])
-                    if not event["timer"]:
-                        messagebox.showerror(APP_TITLE, event["error"], parent=self.root)
+                    self.logger.error("\u9519\u8bef\u63d0\u793a\uff1a%s", event["error"])
                 elif kind == "sign_done":
                     self.signing = False
                     self.sign_btn.configure(state="normal")
@@ -595,6 +708,37 @@ class App:
         except queue.Empty:
             pass
         self.root.after(150, self.consume_events)
+
+    def show_log_menu(self, event: Any) -> None:
+        """??????????"""
+        try:
+            self.log_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.log_menu.grab_release()
+
+    def copy_log_selection(self) -> None:
+        """????????????????????"""
+        try:
+            try:
+                text = self.log.get("sel.first", "sel.last")
+            except TclError:
+                text = self.log.get("1.0", "end-1c")
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()
+            self.logger.info("???????")
+        except Exception as exc:
+            self.logger.error("\u8f93\u5165\u6821\u9a8c\u5931\u8d25\uff1a%s", exc)
+
+    def clear_log(self) -> None:
+        """?? GUI ???????????"""
+        try:
+            self.log.configure(state="normal")
+            self.log.delete("1.0", END)
+            self.log.configure(state="disabled")
+            self.logger.info("GUI ?????")
+        except TclError:
+            pass
 
     def refresh_countdown(self) -> None:
         """每秒使用北京时间刷新下次签到倒计时。"""
@@ -633,8 +777,7 @@ def main() -> None:
         root.mainloop()
     except Exception:
         logging.exception("GUI 启动失败")
-        messagebox.showerror(APP_TITLE, "程序启动失败，请检查程序目录权限。")
-        raise
+        logging.error("\u7a0b\u5e8f\u542f\u52a8\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u7a0b\u5e8f\u76ee\u5f55\u6743\u9650")
 
 
 if __name__ == "__main__":

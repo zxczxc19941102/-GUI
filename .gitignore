@@ -1,0 +1,20 @@
+﻿# Runtime credentials and user-specific state
+config.ini
+state.json
+logs/
+screenshots/
+browser_data/
+
+# Python / PyInstaller build output
+__pycache__/
+*.py[cod]
+*.spec
+/build/
+/dist/
+
+# Local environment/editor files
+.venv/
+venv/
+.env
+.vscode/
+.idea/

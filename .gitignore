@@ -1,27 +1,26 @@
-﻿# Runtime credentials and user-specific state
-config.ini
-state.json
-logs/
-screenshots/
-browser_data/
+# Local credentials and runtime state
+/config.ini
+/state.json
+/logs/
+/screenshots/
+/browser_data/
 
-# Python / PyInstaller build output
+# Python cache and environments
 __pycache__/
 *.py[cod]
-*.spec
-/build/
-/dist/
-
-# Local environment/editor files
 .venv/
 venv/
 .env
 .vscode/
 .idea/
 
-# Temporary alternate PyInstaller output
-*_fixed/
+# PyInstaller outputs and spec files
+/build/
+/build_*/
+/dist/
+/dist_*/
+/*.spec
 
-*_final/
-
-*_final*/
+# Temporary files
+*.tmp
+*.log

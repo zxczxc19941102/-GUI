@@ -486,7 +486,7 @@ class App:
         self.start_btn.pack(side="left", padx=(0, 6))
         self.stop_btn = ttk.Button(buttons, text="停止定时", command=self.stop_scheduler, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
-        self.random_btn = ttk.Button(buttons, text="????", command=self.randomize_schedule, state="disabled")
+        self.random_btn = ttk.Button(buttons, text="\u968f\u673a\u65f6\u95f4", command=self.randomize_schedule, state="disabled")
         self.random_btn.pack(side="left", padx=6)
         self.sign_btn = ttk.Button(buttons, text="立即签到", command=self.manual_sign)
         self.sign_btn.pack(side="left", padx=6)

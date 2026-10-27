@@ -548,14 +548,15 @@ class App:
         self.cancel_btn.configure(state="normal")
         self.status_var.set("正在签到")
         self.cancel_event.clear()
-        threading.Thread(target=self.sign_worker, args=(username, password, source), daemon=True, name="RiverNexusSign").start()
+        source_version = self.schedule_version if source == "timer" else None
+        threading.Thread(target=self.sign_worker, args=(username, password, source, source_version), daemon=True, name="RiverNexusSign").start()
 
     def manual_sign(self) -> None:
         """立即启动一次签到。"""
         self.launch_sign("手动")
 
-    def sign_worker(self, username: str, password: str, source: str) -> None:
-        """后台执行网络登录/签到与每日调度更新。"""
+    def sign_worker(self, username: str, password: str, source: str, source_version: int | None = None) -> None:
+        """\u540e\u53f0\u6267\u884c\u7f51\u7edc\u767b\u5f55/\u7b7e\u5230\u4e0e\u6bcf\u65e5\u8c03\u5ea6\u66f4\u65b0\u3002"""
         try:
             result = sign_once(username, password, self.cancel_event, self.logger)
             today = now_bj().strftime("%Y-%m-%d")
@@ -565,7 +566,7 @@ class App:
                 write_state(self.state)
             self.events.put({"type": "signed", "already": result["already"], "reward": result["reward"], "message": result["message"], "stats": result["stats"], "next": fmt(target)})
             if source == "timer":
-                self.events.put({"type": "restart_scheduler"})
+                self.events.put({"type": "restart_scheduler", "version": source_version})
         except Exception as exc:
             if self.cancel_event.is_set():
                 self.logger.info("\u7b7e\u5230\u4efb\u52a1\u5df2\u505c\u6b62")
@@ -585,7 +586,7 @@ class App:
                     if isinstance(exc, SignError):
                         self.logger.error("\u7b7e\u5230\u5931\u8d25\uff1a%s", error_text)
                     else:
-                        self.logger.exception("\u7b7e\u5230\u5931\u8d25\uff1a%s", error_text)
+                        self.logger.exception("\u7b7e\u5230\u5931\uff1a%s", error_text)
                     retry_minutes = max(1, self.config.getint("settings", "retry_interval_minutes", fallback=30))
                     retry = now_bj() + timedelta(minutes=retry_minutes)
                     with self.guard:
@@ -593,12 +594,14 @@ class App:
                         write_state(self.state)
                     self.events.put({"type": "failed", "error": error_text, "next": fmt(retry), "timer": source == "timer"})
                     if source == "timer":
-                        self.events.put({"type": "restart_scheduler"})
+                        self.events.put({"type": "restart_scheduler", "version": source_version})
         finally:
             self.events.put({"type": "sign_done"})
+            self.logger.info("\u7b7e\u5230\u4efb\u52a1\u6267\u884c\u7ed3\u675f")
+            self.logger.info("-" * 60)
 
     def scheduler_loop(self) -> None:
-        """按北京时间随机窗口轮询；失败按重试间隔再次执行。"""
+        """\u6309\u5317\u4eac\u65f6\u95f4\u8f6e\u8be2\u4e0b\u4e00\u6b21\u8ba1\u5212\uff1b\u5230\u70b9\u540e\u5411\u4e3b\u7ebf\u7a0b\u6295\u9012\u5b9a\u65f6\u7b7e\u5230\u4e8b\u4ef6\u3002"""
         current = now_bj()
         version = self.schedule_version
         today = current.strftime("%Y-%m-%d")
@@ -611,23 +614,31 @@ class App:
             target = saved
         else:
             target = random_today(current)
-        if signed_today:
-            with self.guard:
-                self.state["next_sign_time"] = fmt(target)
-                write_state(self.state)
-        self.events.put({"type": "schedule", "next": fmt(target)})
+
+        # Always persist the selected time so a restart cannot lose the schedule.
+        with self.guard:
+            self.state["next_sign_time"] = fmt(target)
+            write_state(self.state)
+        self.events.put({"type": "schedule", "next": fmt(target), "version": version})
+
         while version == self.schedule_version and not self.stop_event.is_set() and not self.cancel_event.is_set() and not self.closing:
-            if now_bj() >= target:
-                if self.state.get("last_sign_date") == now_bj().strftime("%Y-%m-%d"):
-                    target = random_next_day(now_bj())
+            current = now_bj()
+            if current >= target:
+                with self.guard:
+                    signed_date = self.state.get("last_sign_date", "")
+                if signed_date == current.strftime("%Y-%m-%d"):
+                    target = random_next_day(current)
                     with self.guard:
                         self.state["next_sign_time"] = fmt(target)
                         write_state(self.state)
-                    self.events.put({"type": "schedule", "next": fmt(target)})
+                    self.events.put({"type": "schedule", "next": fmt(target), "version": version})
                     continue
-                self.launch_sign_from_worker()
+                self.logger.info("\u5012\u8ba1\u65f6\u5230\u8fbe\uff0c\u5f00\u59cb\u6267\u884c\u5b9a\u65f6\u7b7e\u5230")
+                self.events.put({"type": "timer_due", "version": version})
                 return
-            self.stop_event.wait(1)
+            # Poll at most once per second and wake immediately when stopped.
+            wait_seconds = min(1.0, max(0.05, (target - current).total_seconds()))
+            self.stop_event.wait(wait_seconds)
 
     def launch_sign_from_worker(self) -> None:
         """调度线程发队列消息，由 GUI 主线程安全启动签到工作线程。"""
@@ -743,10 +754,16 @@ class App:
                         self.stop_btn.configure(state="disabled")
                         self.random_btn.configure(state="disabled")
                 elif kind == "timer_due":
-                    if not self.signing and self.scheduler_enabled:
+                    if (event.get("version") == self.schedule_version
+                            and not self.signing
+                            and self.scheduler_enabled
+                            and not self.stop_event.is_set()):
                         self.launch_sign("timer")
                 elif kind == "restart_scheduler":
-                    if self.scheduler_enabled and not self.closing:
+                    if (self.scheduler_enabled
+                            and not self.stop_event.is_set()
+                            and not self.closing
+                            and (event.get("version") is None or event.get("version") == self.schedule_version)):
                         self.scheduler = threading.Thread(target=self.scheduler_loop, daemon=True, name="RiverNexusScheduler")
                         self.scheduler.start()
                 self.events.task_done()

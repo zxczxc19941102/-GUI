@@ -487,7 +487,6 @@ class App:
         self.stop_btn = ttk.Button(buttons, text="停止定时", command=self.stop_scheduler, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
         self.random_btn = ttk.Button(buttons, text="\u968f\u673a\u65f6\u95f4", command=self.randomize_schedule, state="disabled")
-        self.test_btn = ttk.Button(buttons, text="测试10秒", command=self.test_10s_schedule)
         self.random_btn.pack(side="left", padx=6)
         self.sign_btn = ttk.Button(buttons, text="立即签到", command=self.manual_sign)
         self.sign_btn.pack(side="left", padx=6)
@@ -692,32 +691,37 @@ class App:
         self.scheduler = threading.Thread(target=self.scheduler_loop, daemon=True, name="RiverNexusScheduler")
         self.scheduler.start()
 
-    def test_10s_schedule(self) -> None:
-        """临时测试：沿用定时签到逻辑，把下一次签到安排在 10 秒后。"""
-        if self.signing:
-            return
-        try:
-            self.save_credentials()
-        except Exception as exc:
-            self.logger.error("输入校验失败：%s", exc)
-            self.status_var.set("输入错误，请查看日志")
-            return
-        target = (now_bj() + timedelta(seconds=10)).replace(microsecond=0)
-        self.stop_event.clear()
-        self.cancel_event.clear()
-        with self.guard:
-            self.state["next_sign_time"] = fmt(target)
-            write_state(self.state)
-        self.scheduler_enabled = True
-        self.schedule_version += 1
-        self.start_btn.configure(state="disabled")
-        self.stop_btn.configure(state="normal")
-        self.random_btn.configure(state="normal")
-        self.next_var.set(fmt(target))
-        self.status_var.set("测试签到已安排")
-        self.logger.info("【测试】签到时间：%s（10 秒后）", fmt(target))
-        self.scheduler = threading.Thread(target=self.scheduler_loop, daemon=True, name="RiverNexusScheduler")
-        self.scheduler.start()
+#     def test_10s_schedule(self) -> None:
+#         """临时测试：沿用定时签到逻辑，把下一次签到安排在 10 秒后。"""
+#         if self.signing:
+#             return
+#         try:
+#             self.save_credentials()
+#         except Exception as exc:
+#             self.logger.error("输入校验失败：%s", exc)
+#             self.status_var.set("输入错误，请查看日志")
+#             return
+#         target = (now_bj() + timedelta(seconds=10)).replace(microsecond=0)
+#         self.stop_event.clear()
+#         self.cancel_event.clear()
+#         with self.guard:
+#             self.state["next_sign_time"] = fmt(target)
+#             write_state(self.state)
+#         self.scheduler_enabled = True
+#         self.schedule_version += 1
+#         self.start_btn.configure(state="disabled")
+#         self.stop_btn.configure(state="normal")
+#         self.random_btn.configure(state="normal")
+#         self.next_var.set(fmt(target))
+#         self.status_var.set("测试签到已安排")
+#         self.logger.info("【测试】签到时间：%s（10 秒后）", fmt(target))
+#         self.scheduler = threading.Thread(
+#             target=self.scheduler_loop,
+#             daemon=True,
+#             name="RiverNexusScheduler",
+#         )
+#         self.scheduler.start()
+#
     def immediate_stop(self) -> None:
         """\u7acb\u5373\u8bf7\u6c42\u505c\u6b62\u5f53\u524d\u7b7e\u5230\u53ca\u5b9a\u65f6\u8f6e\u8be2\u3002"""
         self.cancel_event.set()

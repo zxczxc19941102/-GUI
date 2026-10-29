@@ -633,6 +633,8 @@ class App:
                         write_state(self.state)
                     self.events.put({"type": "schedule", "next": fmt(target), "version": version})
                     continue
+                if signed_date and signed_date != current.strftime("%Y-%m-%d"):
+                    self.events.put({"type": "new_day", "today": current.strftime("%Y-%m-%d")})
                 self.logger.info("\u5012\u8ba1\u65f6\u5230\u8fbe\uff0c\u5f00\u59cb\u6267\u884c\u5b9a\u65f6\u7b7e\u5230")
                 self.events.put({"type": "timer_due", "version": version})
                 return
@@ -646,8 +648,6 @@ class App:
 
     def start_scheduler(self) -> None:
         """保存凭据并开始定时线程。"""
-        if self.scheduler and self.scheduler.is_alive():
-            return
         try:
             self.save_credentials()
         except Exception as exc:
@@ -753,7 +753,17 @@ class App:
                         self.start_btn.configure(state="normal")
                         self.stop_btn.configure(state="disabled")
                         self.random_btn.configure(state="disabled")
+                elif kind == "new_day":
+                    if self.state.get("last_sign_date") != event["today"]:
+                        self.today_var.set("未签到")
+                        self.reward_var.set("—")
+                        self.status_var.set("等待定时签到")
+                        self.logger.info("已进入新的一天：%s，等待定时签到", event["today"])
                 elif kind == "timer_due":
+                    if self.state.get("last_sign_date") != now_bj().strftime("%Y-%m-%d"):
+                        self.today_var.set("未签到")
+                        self.reward_var.set("—")
+                        self.status_var.set("等待定时签到")
                     if (event.get("version") == self.schedule_version
                             and not self.signing
                             and self.scheduler_enabled
